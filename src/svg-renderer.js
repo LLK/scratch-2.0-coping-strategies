@@ -4,6 +4,48 @@ const convertFonts = require('./font-converter');
 const fixupSvgString = require('./fixup-svg-string');
 const transformStrokeWidths = require('./transform-applier');
 
+// Common use of the SvgRenderer canvas is during the onFinish callback from
+// loadString/fromString/_draw. During that time other code may use the canvas
+// synchronously. If during that callback another renderer draws (because it has
+// a cached image), with the shared canvas not being available the renderer will
+// create its own unique canvas.
+const canvasContext = (function () {
+    let _canvasContext = null;
+    const _nullCanvasContext = [null, null];
+
+    const getCanvas = () => {
+        if (!_canvasContext) {
+            const canvas = document.createElement('canvas');
+            _canvasContext = [canvas, canvas.getContext('2d')];
+        }
+
+        const _result = _canvasContext;
+        // We only use one shared canvas, if a renderer needs it while it is in
+        // use that renderer will make its own.
+        _canvasContext = _nullCanvasContext;
+        return _result;
+    };
+
+    getCanvas.release = (...releasedCanvasContext) => {
+        // Save the values in a new array.
+        _canvasContext = releasedCanvasContext;
+    };
+
+    return getCanvas;
+}());
+
+// Use of the span element is synchronous, share the same one with all
+// SvgRenderer.
+const createSvgSpot = (function () {
+    let _svgSpot = null;
+    return function () {
+        if (!_svgSpot) {
+            _svgSpot = document.createElement('span');
+        }
+        return _svgSpot;
+    };
+}());
+
 /**
  * Main quirks-mode SVG rendering code.
  */
@@ -15,16 +57,28 @@ class SvgRenderer {
      * @constructor
      */
     constructor (canvas) {
-        this._canvas = canvas || document.createElement('canvas');
-        this._context = this._canvas.getContext('2d');
+        this._useSharedCanvas = !canvas;
+        this._canvas = canvas || null;
+        this._context = canvas ? canvas.getContext('2d') : null;
         this._measurements = {x: 0, y: 0, width: 0, height: 0};
         this._cachedImage = null;
+        this._cachedScale = null;
+        this._svgDom = null;
+        this._svgTag = null;
     }
 
     /**
      * @returns {!HTMLCanvasElement} this renderer's target canvas.
      */
     get canvas () {
+        if (!this._canvas) {
+            // This renderer was using the shared canvas but it is not currently
+            // set because we are not inside the onFinish callback. Stop using
+            // the shared and draw the cached image. If there is no cached
+            // image, we'll just end up with a blank canvas like normal.
+            this._useSharedCanvas = false;
+            this._drawFromImage(this._cachedScale);
+        }
         return this._canvas;
     }
 
@@ -314,16 +368,17 @@ class SvgRenderer {
         // This allows us to use `getBBox` on the page,
         // which returns the full bounding-box of all drawn SVG
         // elements, similar to how Scratch 2.0 did measurement.
-        const svgSpot = document.createElement('span');
+        const svgSpot = createSvgSpot();
         let bbox;
         try {
-            document.body.appendChild(svgSpot);
             svgSpot.appendChild(this._svgTag);
+            document.body.appendChild(svgSpot);
             // Take the bounding box.
             bbox = this._svgTag.getBBox();
         } finally {
             // Always destroy the element, even if, for example, getBBox throws.
             document.body.removeChild(svgSpot);
+            svgSpot.removeChild(this._svgTag);
         }
 
         // Re-parse the SVG from `svgText`. The above DOM becomes
@@ -398,6 +453,7 @@ class SvgRenderer {
             const img = new Image();
             img.onload = () => {
                 this._cachedImage = img;
+                this._cachedScale = scale;
                 this._drawFromImage(scale, onFinish);
             };
             const svgText = this.toString(true /* shouldInjectFonts */);
@@ -412,6 +468,20 @@ class SvgRenderer {
      **/
     _drawFromImage (scale, onFinish) {
         if (!this._cachedImage) return;
+
+        if (this._useSharedCanvas) {
+            // Use the shared canvas if no one else is using it.
+            const [canvas, context] = canvasContext();
+            this._canvas = canvas;
+            this._context = context;
+        }
+        if (!this._canvas) {
+            // We tried to use the shared canvas but it is not available. Make
+            // our own that we'll keep.
+            this._useSharedCanvas = false;
+            this._canvas = document.createElement('canvas');
+            this._context = this._canvas.getContext('2d');
+        }
 
         const ratio = this.getDrawRatio() * (Number.isFinite(scale) ? scale : 1);
         const bbox = this._measurements;
@@ -428,6 +498,13 @@ class SvgRenderer {
         // All finished - call the callback if provided.
         if (onFinish) {
             onFinish();
+        }
+
+        if (this._useSharedCanvas) {
+            // Release the canvas so another renderer can use it.
+            canvasContext.release(this._canvas, this._context);
+            this._canvas = null;
+            this._context = null;
         }
     }
 }
