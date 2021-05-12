@@ -1,5 +1,6 @@
 const SVGRenderer = require('./svg-renderer');
 const BitmapAdapter = require('./bitmap-adapter');
+const fixupSvgString = require('./fixup-svg-string');
 const inlineSvgFonts = require('./font-inliner');
 const loadSvgString = require('./load-svg-string');
 const serializeSvgToString = require('./serialize-svg-to-string');
@@ -12,6 +13,7 @@ const convertFonts = require('./font-converter');
 module.exports = {
     BitmapAdapter: BitmapAdapter,
     convertFonts: convertFonts,
+    fixupSvgString: fixupSvgString,
     inlineSvgFonts: inlineSvgFonts,
     loadSvgString: loadSvgString,
     serializeSvgToString: serializeSvgToString,
